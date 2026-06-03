@@ -12,10 +12,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.typing import ConfigType
 
+from .api import CN_COUNTRY_CODE, ZeekrChinaClient
 from .const import (
     CONF_HMAC_ACCESS_KEY,
     CONF_HMAC_SECRET_KEY,
     CONF_PASSWORD,
+    CONF_PHONE_NUMBER,
+    CONF_SMS_CODE,
     CONF_PASSWORD_PUBLIC_KEY,
     CONF_PROD_SECRET,
     CONF_USERNAME,
@@ -80,7 +83,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     vin_key = entry.data.get(CONF_VIN_KEY, "")
     vin_iv = entry.data.get(CONF_VIN_IV, "'")
 
-    if not username or not password:
+    phone_number = entry.data.get(CONF_PHONE_NUMBER, "")
+    sms_code = entry.data.get(CONF_SMS_CODE, "")
+
+    if country_code == CN_COUNTRY_CODE:
+        if not phone_number or not sms_code:
+            _LOGGER.warning("No phone number or SMS code for China login")
+            return False
+    elif not username or not password:
         _LOGGER.warning("No username or password")
         return False
 
@@ -99,18 +109,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     client = hass.data.get(DOMAIN, {}).pop("_temp_client", None)
 
     if client is None or not client.logged_in:
-        client = ZeekrClient(
-            username=username,
-            password=password,
-            country_code=country_code,
-            hmac_access_key=hmac_access_key,
-            hmac_secret_key=hmac_secret_key,
-            password_public_key=password_public_key,
-            prod_secret=prod_secret,
-            vin_key=vin_key,
-            vin_iv=vin_iv,
-            logger=_LOGGER,
-        )
+        if country_code == CN_COUNTRY_CODE:
+            client = ZeekrChinaClient(
+                phone_number=phone_number,
+                sms_code=sms_code,
+                username=username or phone_number,
+                country_code=country_code,
+                hmac_access_key=hmac_access_key,
+                hmac_secret_key=hmac_secret_key,
+                password_public_key=password_public_key,
+                prod_secret=prod_secret,
+                vin_key=vin_key,
+                vin_iv=vin_iv,
+                logger=_LOGGER,
+            )
+        else:
+            client = ZeekrClient(
+                username=username,
+                password=password,
+                country_code=country_code,
+                hmac_access_key=hmac_access_key,
+                hmac_secret_key=hmac_secret_key,
+                password_public_key=password_public_key,
+                prod_secret=prod_secret,
+                vin_key=vin_key,
+                vin_iv=vin_iv,
+                logger=_LOGGER,
+            )
         try:
             # Count the login request
             stats = ZeekrRequestStats(hass)

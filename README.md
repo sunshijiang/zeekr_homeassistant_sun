@@ -30,7 +30,23 @@ This is a custom integration for Zeekr Electric Vehicles for Home Assistant. It 
 1. Go to Settings -> Devices & Services.
 2. Click "Add Integration".
 3. Search for "Zeekr EV".
-4. Enter your Zeekr account email and password.
+4. Select your region and enter the requested credentials.
+
+### Overseas regions (EU/SEA/EM and others)
+
+Overseas regions continue to use the existing `username` + `password` login flow supplied by `zeekr_ev_api`.
+
+### Mainland China (CN) SMS login
+
+China-region Zeekr accounts do not expose a password login in the China app. Select **China (CN)** as the country/region, then enter:
+
+- `phone_number`: the mainland China mobile number bound to the Zeekr account.
+- `hmac_access_key` and `hmac_secret_key`: keys extracted from the China app, for example with `wysie/zeekr_key_extractor`.
+- Existing vehicle/signature secrets such as `prod_secret`, `vin_key`, and `vin_iv`. The password field is hidden for CN because it is not used.
+
+Submit the form once to request a verification SMS from `https://api-gw-toc.zeekrlife.com/`, then enter the received `sms_code` when Home Assistant shows the SMS-code step. The integration signs China authentication requests with the extracted HMAC keys and uses app-signature header version `2.1` for China API calls.
+
+If Zeekr reports that the verification code is invalid or expired, request a new SMS code and retry. If the account is kicked out on another phone, use a dedicated sub-account shared to the vehicle for Home Assistant.
 
 ## Tips & Tricks
 

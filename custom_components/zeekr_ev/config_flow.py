@@ -1,8 +1,9 @@
 """Adds config flow for Zeekr EV API Integration."""
 
+from __future__ import annotations
+
 import logging
-import re
-from typing import Dict, Any, Optional
+from typing import Any
 
 import voluptuous as vol
 
@@ -10,37 +11,165 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
+from .api import CN_COUNTRY_CODE, ZeekrChinaClient, ZeekrChinaSmsCodeError
 from .const import (
+    CONF_COUNTRY_CODE,
+    CONF_DRIVE_SIDE,
     CONF_HMAC_ACCESS_KEY,
     CONF_HMAC_SECRET_KEY,
     CONF_PASSWORD,
     CONF_PASSWORD_PUBLIC_KEY,
+    CONF_PHONE_NUMBER,
     CONF_POLLING_INTERVAL,
     CONF_PROD_SECRET,
+    CONF_SMS_CODE,
     CONF_USERNAME,
+    CONF_USE_LOCAL_API,
     CONF_VIN_IV,
     CONF_VIN_KEY,
-    CONF_COUNTRY_CODE,
-    CONF_USE_LOCAL_API,
-    CONF_DRIVE_SIDE,
-    DRIVE_SIDE_LHD,
-    DRIVE_SIDE_RHD,
+    COUNTRY_CODE_MAPPING,
     DEFAULT_POLLING_INTERVAL,
     DOMAIN,
-    COUNTRY_CODE_MAPPING,
+    DRIVE_SIDE_LHD,
+    DRIVE_SIDE_RHD,
 )
-from .utils import get_zeekr_client_class
+from .utils import get_zeekr_client_class, validate_input
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def is_base64(s: str) -> bool:
-    """Check if string is base64 encoded."""
-    if not s:
-        return False
-    # Base64 pattern
-    pattern = r"^[A-Za-z0-9+/]*={0,2}$"
-    return bool(re.match(pattern, s)) and (len(s) % 4 == 0)
+def _is_cn(data: dict[str, Any]) -> bool:
+    """Return whether the selected region is mainland China."""
+    return data.get(CONF_COUNTRY_CODE) == CN_COUNTRY_CODE
+
+
+def _strip_input(user_input: dict[str, Any]) -> None:
+    """Trim whitespace from all string fields in-place."""
+    for key, value in list(user_input.items()):
+        if isinstance(value, str):
+            user_input[key] = value.strip()
+
+
+def _country_selector(defaults: dict[str, Any]) -> selector.SelectSelector:
+    """Build the country selector including the China region."""
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=[
+                selector.SelectOptionDict(value=code, label=f"{name} ({code})")
+                for code, (name, _) in COUNTRY_CODE_MAPPING.items()
+            ]
+        )
+    )
+
+
+def _drive_side_selector() -> selector.SelectSelector:
+    """Build the drive-side selector."""
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=[
+                selector.SelectOptionDict(
+                    value=DRIVE_SIDE_LHD, label="Left-Hand Drive (LHD)"
+                ),
+                selector.SelectOptionDict(
+                    value=DRIVE_SIDE_RHD, label="Right-Hand Drive (RHD)"
+                ),
+            ]
+        )
+    )
+
+
+def _secret_selector() -> selector.TextSelector:
+    """Return a password-style text selector for secret values."""
+    return selector.TextSelector(
+        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+    )
+
+
+def _build_schema(
+    defaults: dict[str, Any], *, include_sms_code: bool = False
+) -> vol.Schema:
+    """Build a config schema, hiding password for China SMS login."""
+    cn_region = _is_cn(defaults)
+    schema: dict[Any, Any] = {
+        vol.Optional(
+            CONF_COUNTRY_CODE, default=defaults.get(CONF_COUNTRY_CODE, "AU")
+        ): _country_selector(defaults),
+    }
+
+    if cn_region:
+        schema[
+            vol.Required(CONF_PHONE_NUMBER, default=defaults.get(CONF_PHONE_NUMBER, ""))
+        ] = str
+        schema[
+            vol.Optional(
+                CONF_USERNAME,
+                default=defaults.get(
+                    CONF_USERNAME, defaults.get(CONF_PHONE_NUMBER, "")
+                ),
+            )
+        ] = str
+        if include_sms_code:
+            schema[
+                vol.Required(CONF_SMS_CODE, default=defaults.get(CONF_SMS_CODE, ""))
+            ] = str
+    else:
+        schema[vol.Required(CONF_USERNAME, default=defaults.get(CONF_USERNAME, ""))] = (
+            str
+        )
+        schema[vol.Required(CONF_PASSWORD, default=defaults.get(CONF_PASSWORD, ""))] = (
+            _secret_selector()
+        )
+
+    schema.update(
+        {
+            vol.Optional(
+                CONF_POLLING_INTERVAL,
+                default=defaults.get(CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL),
+            ): int,
+            vol.Optional(
+                CONF_HMAC_ACCESS_KEY, default=defaults.get(CONF_HMAC_ACCESS_KEY, "")
+            ): _secret_selector(),
+            vol.Optional(
+                CONF_HMAC_SECRET_KEY, default=defaults.get(CONF_HMAC_SECRET_KEY, "")
+            ): _secret_selector(),
+            vol.Optional(
+                CONF_PASSWORD_PUBLIC_KEY,
+                default=defaults.get(CONF_PASSWORD_PUBLIC_KEY, ""),
+            ): str,
+            vol.Optional(
+                CONF_PROD_SECRET, default=defaults.get(CONF_PROD_SECRET, "")
+            ): str,
+            vol.Optional(
+                CONF_VIN_KEY, default=defaults.get(CONF_VIN_KEY, "")
+            ): _secret_selector(),
+            vol.Optional(
+                CONF_VIN_IV, default=defaults.get(CONF_VIN_IV, "")
+            ): _secret_selector(),
+            vol.Optional(
+                CONF_USE_LOCAL_API, default=defaults.get(CONF_USE_LOCAL_API, False)
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_DRIVE_SIDE, default=defaults.get(CONF_DRIVE_SIDE, DRIVE_SIDE_LHD)
+            ): _drive_side_selector(),
+        }
+    )
+    return vol.Schema(schema)
+
+
+def _validate_required(user_input: dict[str, Any]) -> str | None:
+    """Validate fields that are always required for the selected auth mode."""
+    _strip_input(user_input)
+    if _is_cn(user_input):
+        if not user_input.get(CONF_PHONE_NUMBER):
+            return "phone_required"
+        # China does not need the RSA password public key because no password is sent.
+        cn_input = dict(user_input)
+        cn_input.pop(CONF_PASSWORD_PUBLIC_KEY, None)
+        return validate_input(cn_input)
+
+    if not user_input.get(CONF_USERNAME) or not user_input.get(CONF_PASSWORD):
+        return "auth"
+    return validate_input(user_input)
 
 
 class ZeekrEVAPIFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
@@ -51,18 +180,22 @@ class ZeekrEVAPIFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: 
 
     def __init__(self) -> None:
         """Initialize."""
-        self._errors: Dict[str, str] = {}
+        self._errors: dict[str, str] = {}
         self._temp_client = None
+        self._cn_pending_input: dict[str, Any] | None = None
 
     async def async_step_user(self, user_input=None):
         """Handle a flow initialized by the user."""
         self._errors = {}
 
         if user_input is not None:
-            validation_error = self._validate_input(user_input)
+            validation_error = _validate_required(user_input)
             if validation_error:
                 self._errors["base"] = validation_error
                 return await self._show_config_form(user_input)
+
+            if _is_cn(user_input):
+                return await self._handle_cn_initial(user_input)
 
             valid = await self._test_credentials(
                 user_input[CONF_USERNAME],
@@ -77,62 +210,76 @@ class ZeekrEVAPIFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: 
                 user_input.get(CONF_USE_LOCAL_API, False),
             )
             if valid:
-                # Store the client for async_setup_entry to reuse
-                self.hass.data.setdefault(DOMAIN, {})["_temp_client"] = (
-                    self._temp_client
-                )
+                self.hass.data.setdefault(DOMAIN, {})[
+                    "_temp_client"
+                ] = self._temp_client
                 return self.async_create_entry(
                     title=user_input[CONF_USERNAME], data=user_input
                 )
             self._errors["base"] = "auth"
-
             return await self._show_config_form(user_input)
 
         return await self._show_config_form(user_input)
 
-    def _validate_input(self, user_input: Dict[str, Any]) -> Optional[str]:
-        """Validate user input format and length."""
-        # Helper to strip and check
-        def check_field(key, min_len=None, exact_len=None):
-            val = user_input.get(key, "").strip()
-            # Update user_input with stripped value
-            user_input[key] = val
+    async def async_step_cn_sms(self, user_input=None):
+        """Validate the China SMS code and create the config entry."""
+        self._errors = {}
+        if self._cn_pending_input is None:
+            return await self.async_step_user()
 
-            if not is_base64(val):
-                return f"invalid_base64_{key}"
+        data = dict(self._cn_pending_input)
+        if user_input:
+            data.update(user_input)
+            _strip_input(data)
+            if not data.get(CONF_SMS_CODE):
+                self._errors["base"] = "sms_code_required"
+            else:
+                valid = await self._test_cn_credentials(data)
+                if valid:
+                    data[CONF_USERNAME] = (
+                        data.get(CONF_USERNAME) or data[CONF_PHONE_NUMBER]
+                    )
+                    data[CONF_PASSWORD] = ""
+                    self.hass.data.setdefault(DOMAIN, {})[
+                        "_temp_client"
+                    ] = self._temp_client
+                    return self.async_create_entry(
+                        title=data[CONF_PHONE_NUMBER], data=data
+                    )
+                if "base" not in self._errors:
+                    self._errors["base"] = "sms_code_invalid"
 
-            if min_len and len(val) < min_len:
-                return f"invalid_length_min_{min_len}_{key}"
+        return self.async_show_form(
+            step_id="cn_sms",
+            data_schema=_build_schema(data, include_sms_code=True),
+            errors=self._errors,
+        )
 
-            if exact_len and len(val) != exact_len:
-                return f"invalid_length_exact_{exact_len}_{key}"
-            return None
+    async def _handle_cn_initial(self, user_input: dict[str, Any]):
+        """Send an SMS code before collecting the verification code."""
+        self._cn_pending_input = dict(user_input)
+        try:
+            await self.hass.async_add_executor_job(self._send_cn_sms_code, user_input)
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.warning("Unable to send Zeekr China SMS code: %s", err)
+            self._errors["base"] = "sms_send_failed"
+            return await self._show_config_form(user_input)
+        return await self.async_step_cn_sms()
 
-        # Validate HMAC Access Key (>= 32)
-        if err := check_field(CONF_HMAC_ACCESS_KEY, min_len=32):
-            return err
-
-        # Validate HMAC Secret Key (>= 32)
-        if err := check_field(CONF_HMAC_SECRET_KEY, min_len=32):
-            return err
-
-        # Validate Password Public Key (>= 200)
-        if err := check_field(CONF_PASSWORD_PUBLIC_KEY, min_len=200):
-            return err
-
-        # Validate Prod Secret (Exact 32)
-        if err := check_field(CONF_PROD_SECRET, exact_len=32):
-            return err
-
-        # Validate VIN Key (Exact 16)
-        if err := check_field(CONF_VIN_KEY, exact_len=16):
-            return err
-
-        # Validate VIN IV (Exact 16)
-        if err := check_field(CONF_VIN_IV, exact_len=16):
-            return err
-
-        return None
+    def _send_cn_sms_code(self, user_input: dict[str, Any]) -> None:
+        client = ZeekrChinaClient(
+            phone_number=user_input[CONF_PHONE_NUMBER],
+            username=user_input.get(CONF_USERNAME) or user_input[CONF_PHONE_NUMBER],
+            country_code=CN_COUNTRY_CODE,
+            hmac_access_key=user_input.get(CONF_HMAC_ACCESS_KEY, ""),
+            hmac_secret_key=user_input.get(CONF_HMAC_SECRET_KEY, ""),
+            password_public_key=user_input.get(CONF_PASSWORD_PUBLIC_KEY, ""),
+            prod_secret=user_input.get(CONF_PROD_SECRET, ""),
+            vin_key=user_input.get(CONF_VIN_KEY, ""),
+            vin_iv=user_input.get(CONF_VIN_IV, ""),
+            logger=_LOGGER,
+        )
+        client.send_sms_code()
 
     @staticmethod
     @callback
@@ -140,90 +287,10 @@ class ZeekrEVAPIFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: 
         return ZeekrEVAPIOptionsFlowHandler(config_entry)
 
     async def _show_config_form(self, user_input):
-        """Show the configuration form to edit location data."""
-        defaults = user_input or {}
+        """Show the configuration form."""
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_USERNAME, default=defaults.get(CONF_USERNAME, "")
-                    ): str,
-                    vol.Required(
-                        CONF_PASSWORD, default=defaults.get(CONF_PASSWORD, "")
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_COUNTRY_CODE,
-                        default=defaults.get(CONF_COUNTRY_CODE, "AU"),
-                    ): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                selector.SelectOptionDict(
-                                    value=code,
-                                    label=f"{name} ({code})"
-                                )
-                                for code, (name, _) in COUNTRY_CODE_MAPPING.items()
-                            ]
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_POLLING_INTERVAL,
-                        default=defaults.get(CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL),
-                    ): int,
-                    vol.Optional(
-                        CONF_HMAC_ACCESS_KEY,
-                        default=defaults.get(CONF_HMAC_ACCESS_KEY, ""),
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_HMAC_SECRET_KEY,
-                        default=defaults.get(CONF_HMAC_SECRET_KEY, ""),
-                    ): str,
-                    vol.Optional(
-                        CONF_PASSWORD_PUBLIC_KEY,
-                        default=defaults.get(CONF_PASSWORD_PUBLIC_KEY, ""),
-                    ): str,
-                    vol.Optional(
-                        CONF_PROD_SECRET, default=defaults.get(CONF_PROD_SECRET, "")
-                    ): str,
-                    vol.Optional(
-                        CONF_VIN_KEY, default=defaults.get(CONF_VIN_KEY, "")
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_VIN_IV, default=defaults.get(CONF_VIN_IV, "")
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_USE_LOCAL_API,
-                        default=defaults.get(CONF_USE_LOCAL_API, False),
-                    ): selector.BooleanSelector(),
-                    vol.Optional(
-                        CONF_DRIVE_SIDE,
-                        default=defaults.get(CONF_DRIVE_SIDE, DRIVE_SIDE_LHD),
-                    ): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                selector.SelectOptionDict(value=DRIVE_SIDE_LHD, label="Left-Hand Drive (LHD)"),
-                                selector.SelectOptionDict(value=DRIVE_SIDE_RHD, label="Right-Hand Drive (RHD)"),
-                            ]
-                        )
-                    ),
-                }
-            ),
+            data_schema=_build_schema(user_input or {}),
             errors=self._errors,
         )
 
@@ -260,10 +327,33 @@ class ZeekrEVAPIFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: 
             await self.hass.async_add_executor_job(client.login)
             self._temp_client = client
         except Exception:  # pylint: disable=broad-except
-            pass
-        else:
-            return True
-        return False
+            return False
+        return True
+
+    async def _test_cn_credentials(self, data: dict[str, Any]) -> bool:
+        """Return true if China SMS credentials are valid."""
+        try:
+            client = ZeekrChinaClient(
+                phone_number=data[CONF_PHONE_NUMBER],
+                sms_code=data[CONF_SMS_CODE],
+                username=data.get(CONF_USERNAME) or data[CONF_PHONE_NUMBER],
+                country_code=CN_COUNTRY_CODE,
+                hmac_access_key=data.get(CONF_HMAC_ACCESS_KEY, ""),
+                hmac_secret_key=data.get(CONF_HMAC_SECRET_KEY, ""),
+                password_public_key=data.get(CONF_PASSWORD_PUBLIC_KEY, ""),
+                prod_secret=data.get(CONF_PROD_SECRET, ""),
+                vin_key=data.get(CONF_VIN_KEY, ""),
+                vin_iv=data.get(CONF_VIN_IV, ""),
+                logger=_LOGGER,
+            )
+            await self.hass.async_add_executor_job(client.login)
+            self._temp_client = client
+        except ZeekrChinaSmsCodeError:
+            self._errors["base"] = "sms_code_invalid"
+            return False
+        except Exception:  # pylint: disable=broad-except
+            return False
+        return True
 
 
 class ZeekrEVAPIOptionsFlowHandler(config_entries.OptionsFlow):
@@ -278,171 +368,70 @@ class ZeekrEVAPIOptionsFlowHandler(config_entries.OptionsFlow):
         return await self.async_step_user()
 
     async def async_step_user(self, user_input=None):
-        """Handle a flow initialized by the user."""
-        errors = {}
+        """Handle an options flow."""
+        errors: dict[str, str] = {}
+        data = {**self._config_entry.data}
 
         if user_input is not None:
-            # Validate credentials if changed
-
-            # Helper for validation in options flow
-            def check_field(key, min_len=None, exact_len=None):
-                val = user_input.get(key, "").strip()
-                # Update user_input with stripped value
-                user_input[key] = val
-
-                # If field is not present or unchanged (masked), we might need to handle it.
-                # But here we assume if it's provided in user_input, we validate it.
-                # However, if it's a re-auth/options flow, empty fields might mean "no change"?
-                # But the schema sets defaults from existing config.
-
-                if not is_base64(val):
-                    return f"invalid_base64_{key}"
-
-                if min_len and len(val) < min_len:
-                    return f"invalid_length_min_{min_len}_{key}"
-
-                if exact_len and len(val) != exact_len:
-                    return f"invalid_length_exact_{exact_len}_{key}"
-                return None
-
-            # Since user_input comes from the form, it will contain values (possibly defaults).
-            # We should validate them if they are being updated.
-            # But wait, options flow merges with existing data?
-            # In async_step_user, we check if values changed compared to self._config_entry.data
-
-            # Let's perform validation first
-            validation_error = None
-            if CONF_HMAC_ACCESS_KEY in user_input:
-                validation_error = check_field(CONF_HMAC_ACCESS_KEY, min_len=32)
-            if not validation_error and CONF_HMAC_SECRET_KEY in user_input:
-                validation_error = check_field(CONF_HMAC_SECRET_KEY, min_len=32)
-            if not validation_error and CONF_PASSWORD_PUBLIC_KEY in user_input:
-                validation_error = check_field(CONF_PASSWORD_PUBLIC_KEY, min_len=200)
-            if not validation_error and CONF_PROD_SECRET in user_input:
-                validation_error = check_field(CONF_PROD_SECRET, exact_len=32)
-            if not validation_error and CONF_VIN_KEY in user_input:
-                validation_error = check_field(CONF_VIN_KEY, exact_len=16)
-            if not validation_error and CONF_VIN_IV in user_input:
-                validation_error = check_field(CONF_VIN_IV, exact_len=16)
-
+            merged = {**data, **user_input}
+            validation_error = _validate_required(merged)
             if validation_error:
                 errors["base"] = validation_error
             else:
-                if (
-                    user_input.get(CONF_USERNAME) != self._config_entry.data.get(CONF_USERNAME)
-                    or user_input.get(CONF_PASSWORD) != self._config_entry.data.get(CONF_PASSWORD)
-                    or user_input.get(CONF_COUNTRY_CODE, "") != self._config_entry.data.get(CONF_COUNTRY_CODE, "")
-                    or user_input.get(CONF_HMAC_ACCESS_KEY) != self._config_entry.data.get(CONF_HMAC_ACCESS_KEY, "")
-                    or user_input.get(CONF_HMAC_SECRET_KEY) != self._config_entry.data.get(CONF_HMAC_SECRET_KEY, "")
-                    or user_input.get(CONF_PASSWORD_PUBLIC_KEY) != self._config_entry.data.get(CONF_PASSWORD_PUBLIC_KEY, "")
-                    or user_input.get(CONF_PROD_SECRET) != self._config_entry.data.get(CONF_PROD_SECRET, "")
-                    or user_input.get(CONF_VIN_KEY) != self._config_entry.data.get(CONF_VIN_KEY, "")
-                    or user_input.get(CONF_VIN_IV) != self._config_entry.data.get(CONF_VIN_IV, "")
-                    or user_input.get(CONF_USE_LOCAL_API, False) != self._config_entry.data.get(CONF_USE_LOCAL_API, False)
-                ):
+                needs_auth = any(
+                    merged.get(key) != data.get(key)
+                    for key in (
+                        CONF_USERNAME,
+                        CONF_PASSWORD,
+                        CONF_PHONE_NUMBER,
+                        CONF_SMS_CODE,
+                        CONF_COUNTRY_CODE,
+                        CONF_HMAC_ACCESS_KEY,
+                        CONF_HMAC_SECRET_KEY,
+                        CONF_PASSWORD_PUBLIC_KEY,
+                        CONF_PROD_SECRET,
+                        CONF_VIN_KEY,
+                        CONF_VIN_IV,
+                        CONF_USE_LOCAL_API,
+                    )
+                )
+                if needs_auth and not _is_cn(merged):
                     valid = await self._test_credentials(
-                        user_input.get(CONF_USERNAME, self._config_entry.data.get(CONF_USERNAME)),
-                        user_input.get(CONF_PASSWORD, self._config_entry.data.get(CONF_PASSWORD)),
-                        user_input.get(CONF_COUNTRY_CODE, self._config_entry.data.get(CONF_COUNTRY_CODE, "")),
-                        user_input.get(CONF_HMAC_ACCESS_KEY, self._config_entry.data.get(CONF_HMAC_ACCESS_KEY, "")),
-                        user_input.get(CONF_HMAC_SECRET_KEY, self._config_entry.data.get(CONF_HMAC_SECRET_KEY, "")),
-                        user_input.get(CONF_PASSWORD_PUBLIC_KEY, self._config_entry.data.get(CONF_PASSWORD_PUBLIC_KEY, "")),
-                        user_input.get(CONF_PROD_SECRET, self._config_entry.data.get(CONF_PROD_SECRET, "")),
-                        user_input.get(CONF_VIN_KEY, self._config_entry.data.get(CONF_VIN_KEY, "")),
-                        user_input.get(CONF_VIN_IV, self._config_entry.data.get(CONF_VIN_IV, "")),
-                        user_input.get(CONF_USE_LOCAL_API, self._config_entry.data.get(CONF_USE_LOCAL_API, False)),
+                        merged.get(CONF_USERNAME),
+                        merged.get(CONF_PASSWORD),
+                        merged.get(CONF_COUNTRY_CODE, ""),
+                        merged.get(CONF_HMAC_ACCESS_KEY, ""),
+                        merged.get(CONF_HMAC_SECRET_KEY, ""),
+                        merged.get(CONF_PASSWORD_PUBLIC_KEY, ""),
+                        merged.get(CONF_PROD_SECRET, ""),
+                        merged.get(CONF_VIN_KEY, ""),
+                        merged.get(CONF_VIN_IV, ""),
+                        merged.get(CONF_USE_LOCAL_API, False),
                     )
                     if not valid:
                         errors["base"] = "auth"
-                    else:
-                        # Update config entry data with new values
-                        self.hass.config_entries.async_update_entry(
-                            self._config_entry, data=user_input
-                        )
-                        await self.hass.config_entries.async_reload(self._config_entry.entry_id)
-                        return self.async_abort(reason="reconfigure_successful")
-                else:
-                    # Update config entry data with new values
-                    self.hass.config_entries.async_update_entry(
-                        self._config_entry, data=user_input
-                    )
-                    await self.hass.config_entries.async_reload(self._config_entry.entry_id)
-                    return self.async_abort(reason="reconfigure_successful")
+                elif needs_auth and _is_cn(merged) and not merged.get(CONF_SMS_CODE):
+                    errors["base"] = "sms_code_required"
 
-        # Merge existing data
-        data = {**self._config_entry.data}
+                if not errors:
+                    if _is_cn(merged):
+                        merged[CONF_USERNAME] = merged.get(CONF_USERNAME) or merged.get(
+                            CONF_PHONE_NUMBER
+                        )
+                        merged[CONF_PASSWORD] = ""
+                    self.hass.config_entries.async_update_entry(
+                        self._config_entry, data=merged
+                    )
+                    await self.hass.config_entries.async_reload(
+                        self._config_entry.entry_id
+                    )
+                    return self.async_abort(reason="reconfigure_successful")
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_USERNAME, default=data.get(CONF_USERNAME, "")
-                    ): str,
-                    vol.Required(
-                        CONF_PASSWORD, default=data.get(CONF_PASSWORD, "")
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_COUNTRY_CODE,
-                        default=data.get(CONF_COUNTRY_CODE, ""),
-                    ): str,
-                    vol.Optional(
-                        CONF_POLLING_INTERVAL,
-                        default=data.get(CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL),
-                    ): int,
-                    vol.Optional(
-                        CONF_HMAC_ACCESS_KEY,
-                        default=data.get(CONF_HMAC_ACCESS_KEY, ""),
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_HMAC_SECRET_KEY,
-                        default=data.get(CONF_HMAC_SECRET_KEY, ""),
-                    ): str,
-                    vol.Optional(
-                        CONF_PASSWORD_PUBLIC_KEY,
-                        default=data.get(CONF_PASSWORD_PUBLIC_KEY, ""),
-                    ): str,
-                    vol.Optional(
-                        CONF_PROD_SECRET, default=data.get(CONF_PROD_SECRET, "")
-                    ): str,
-                    vol.Optional(
-                        CONF_VIN_KEY, default=data.get(CONF_VIN_KEY, "")
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_VIN_IV, default=data.get(CONF_VIN_IV, "")
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_USE_LOCAL_API,
-                        default=data.get(CONF_USE_LOCAL_API, False),
-                    ): selector.BooleanSelector(),
-                    vol.Optional(
-                        CONF_DRIVE_SIDE,
-                        default=data.get(CONF_DRIVE_SIDE, DRIVE_SIDE_LHD),
-                    ): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                selector.SelectOptionDict(value=DRIVE_SIDE_LHD, label="Left-Hand Drive (LHD)"),
-                                selector.SelectOptionDict(value=DRIVE_SIDE_RHD, label="Right-Hand Drive (RHD)"),
-                            ]
-                        )
-                    ),
-                }
+            data_schema=_build_schema(
+                {**data, **(user_input or {})},
+                include_sms_code=_is_cn({**data, **(user_input or {})}),
             ),
             errors=errors,
         )
@@ -460,7 +449,7 @@ class ZeekrEVAPIOptionsFlowHandler(config_entries.OptionsFlow):
         vin_iv,
         use_local_api=False,
     ):
-        """Return true if credentials is valid."""
+        """Return true if credentials are valid."""
         try:
             ZeekrClient = await self.hass.async_add_executor_job(
                 get_zeekr_client_class, use_local_api
@@ -479,7 +468,5 @@ class ZeekrEVAPIOptionsFlowHandler(config_entries.OptionsFlow):
             )
             await self.hass.async_add_executor_job(client.login)
         except Exception:  # pylint: disable=broad-except
-            pass
-        else:
-            return True
-        return False
+            return False
+        return True

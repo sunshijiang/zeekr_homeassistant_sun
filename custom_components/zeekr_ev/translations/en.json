@@ -15,15 +15,20 @@
           "prod_secret": "Prod secret",
           "vin_key": "VIN key",
           "vin_iv": "VIN IV",
-          "use_local_api": "Use local API (custom_components/zeekr_ev_api)"
+          "use_local_api": "Use local API (custom_components/zeekr_ev_api)",
+          "phone_number": "Phone number",
+          "sms_code": "SMS verification code",
+          "drive_side": "Drive side"
         },
         "data_description": {
-          "use_local_api": "Enable to use the local zeekr_ev_api folder from custom_components. Disable to use an installed package (pip)."
+          "use_local_api": "Enable to use the local zeekr_ev_api folder from custom_components. Disable to use an installed package (pip).",
+          "country_code": "Select China (CN) for SMS verification-code login. Password is only used for overseas regions.",
+          "sms_code": "For China, submit once without a code to request an SMS, then enter the received code."
         }
       }
     },
     "error": {
-      "auth": "Username/Password is wrong.",
+      "auth": "Authentication failed. For China, verify the SMS code and use a dedicated/sub-account if another device login conflicts.",
       "invalid_base64_hmac_access_key": "HMAC access key must be base64 encoded.",
       "invalid_length_min_32_hmac_access_key": "HMAC access key must be at least 32 characters.",
       "invalid_base64_hmac_secret_key": "HMAC secret key must be base64 encoded.",
@@ -35,10 +40,15 @@
       "invalid_base64_vin_key": "VIN key must be base64 encoded.",
       "invalid_length_exact_16_vin_key": "VIN key must be exactly 16 characters.",
       "invalid_base64_vin_iv": "VIN IV must be base64 encoded.",
-      "invalid_length_exact_16_vin_iv": "VIN IV must be exactly 16 characters."
+      "invalid_length_exact_16_vin_iv": "VIN IV must be exactly 16 characters.",
+      "phone_required": "Phone number is required for China login.",
+      "sms_code_required": "SMS verification code is required.",
+      "sms_send_failed": "Unable to request an SMS code from Zeekr China. Check the phone number and extracted HMAC keys, then try again.",
+      "sms_code_invalid": "Verification code is invalid or expired. Please request a new code."
     },
     "abort": {
-      "single_instance_allowed": "Only a single instance is allowed."
+      "single_instance_allowed": "Only a single instance is allowed.",
+      "reconfigure_successful": "Reconfiguration successful."
     }
   },
   "options": {
@@ -58,15 +68,19 @@
           "vin_key": "VIN key",
           "vin_iv": "VIN IV",
           "drive_side": "Drive side",
-          "use_local_api": "Use local API (custom_components/zeekr_ev_api)"
+          "use_local_api": "Use local API (custom_components/zeekr_ev_api)",
+          "phone_number": "Phone number",
+          "sms_code": "SMS verification code"
         },
         "data_description": {
-          "use_local_api": "Enable to use the local zeekr_ev_api folder from custom_components. Disable to use an installed package (pip)."
+          "use_local_api": "Enable to use the local zeekr_ev_api folder from custom_components. Disable to use an installed package (pip).",
+          "country_code": "Select China (CN) for SMS verification-code login. Password is only used for overseas regions.",
+          "sms_code": "For China, submit once without a code to request an SMS, then enter the received code."
         }
       }
     },
     "error": {
-      "auth": "Username/Password is wrong.",
+      "auth": "Authentication failed. For China, verify the SMS code and use a dedicated/sub-account if another device login conflicts.",
       "invalid_base64_hmac_access_key": "HMAC access key must be base64 encoded.",
       "invalid_length_min_32_hmac_access_key": "HMAC access key must be at least 32 characters.",
       "invalid_base64_hmac_secret_key": "HMAC secret key must be base64 encoded.",
@@ -78,7 +92,11 @@
       "invalid_base64_vin_key": "VIN key must be base64 encoded.",
       "invalid_length_exact_16_vin_key": "VIN key must be exactly 16 characters.",
       "invalid_base64_vin_iv": "VIN IV must be base64 encoded.",
-      "invalid_length_exact_16_vin_iv": "VIN IV must be exactly 16 characters."
+      "invalid_length_exact_16_vin_iv": "VIN IV must be exactly 16 characters.",
+      "phone_required": "Phone number is required for China login.",
+      "sms_code_required": "SMS verification code is required.",
+      "sms_send_failed": "Unable to request an SMS code from Zeekr China. Check the phone number and extracted HMAC keys, then try again.",
+      "sms_code_invalid": "Verification code is invalid or expired. Please request a new code."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration successful."
