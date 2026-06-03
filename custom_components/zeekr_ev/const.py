@@ -46,13 +46,28 @@ DATETIME = "datetime"
 NUMBER = "number"
 SELECT = "select"
 TIME = "time"
-PLATFORMS = [BINARY_SENSOR, BUTTON, CLIMATE, COVER, DATETIME, DEVICE_TRACKER, LOCK, NUMBER, SELECT, SENSOR, SWITCH, TIME]
+PLATFORMS = [
+    BINARY_SENSOR,
+    BUTTON,
+    CLIMATE,
+    COVER,
+    DATETIME,
+    DEVICE_TRACKER,
+    LOCK,
+    NUMBER,
+    SELECT,
+    SENSOR,
+    SWITCH,
+    TIME,
+]
 
 
 # Configuration and options
 CONF_ENABLED = "enabled"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
+CONF_PHONE_NUMBER = "phone_number"
+CONF_SMS_CODE = "sms_code"
 CONF_COUNTRY_CODE = "country_code"
 CONF_HMAC_ACCESS_KEY = "hmac_access_key"
 CONF_HMAC_SECRET_KEY = "hmac_secret_key"
@@ -72,6 +87,7 @@ DEFAULT_POLLING_INTERVAL = 5  # minutes
 
 # Country code to (country_name, region) mapping
 COUNTRY_CODE_MAPPING = {
+    "CN": ("China", "CN"),
     "AD": ("Andorra", "EU"),
     "AE": ("United Arab Emirates", "UAE"),
     "AL": ("Albania", "EU"),
